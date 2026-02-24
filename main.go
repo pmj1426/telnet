@@ -71,13 +71,14 @@ func Run(ctx context.Context, config string) error {
 		return fmt.Errorf("tcp dial failed")
 	}
 	defer conn.Close()
+	conn.SetDeadline(ctx.Deadline)
 
 	reader := bufio.NewReader(conn)
 
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return fmt.Errorf("context deadline is not set")
+			return fmt.Errorf("login failed")
 		}
 		if strings.Contains(line, "login:") {
 			fmt.Fprintf(conn, "%s\n", conf.Username)
@@ -88,7 +89,7 @@ func Run(ctx context.Context, config string) error {
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return fmt.Errorf("context deadline is not set")
+			return fmt.Errorf("login failed")
 		}
 		if strings.Contains(line, "Password:") {
 			fmt.Fprintf(conn, "%s\n", conf.Password)
@@ -98,10 +99,10 @@ func Run(ctx context.Context, config string) error {
 
 	line, err := reader.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("context deadline is not set")
+		return fmt.Errorf("login failed")
 	}
 	if strings.Contains(line, "login:") {
-		return fmt.Errorf("Login failed")
+		return fmt.Errorf("Login failed with username or password")
 	}
 
 	time.Sleep(1 * time.Second)
