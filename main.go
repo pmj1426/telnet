@@ -1,12 +1,15 @@
 package ssh
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/scorify/schema"
-	"golang.org/x/crypto/ssh"
 )
 
 type Schema struct {
@@ -57,47 +60,69 @@ func Run(ctx context.Context, config string) error {
 		return err
 	}
 
-	ssh_config := &ssh.ClientConfig{
-		User: conf.Username,
-		Auth: []ssh.AuthMethod{
-			ssh.Password(conf.Password),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return fmt.Errorf("context deadline is not set")
 	}
 
-	target := fmt.Sprintf("%s:%d", conf.Server, conf.Port)
 	errChan := make(chan error)
 
 	go func() {
 		defer close(errChan)
-		client, err := ssh.Dial("tcp", target, ssh_config)
+
+		address := net.JoinHostPort(conf.Server, strconv.Itoa(conf.Port))
+		conn, err := net.DialTimeout("tcp", address, time.Until(deadline))
 		if err != nil {
 			errChan <- err
 			return
 		}
-		defer client.Close()
+		defer conn.Close()
 
-		session, err := client.NewSession()
-		if err != nil {
-			errChan <- err
-			return
+		reader := bufio.NewReader(conn)
+
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				errChan <- err
+				return
+			}
+			if strings.Contains(line, "login:") {
+				fmt.Fprintf(conn, "%s\n", conf.Username)
+				break
+			}
 		}
-		defer session.Close()
 
-		output, err := session.CombinedOutput(conf.Command)
-		if err != nil {
-			errChan <- err
-			return
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				errChan <- err
+				return
+			}
+			if strings.Contains(line, "Password:") {
+				fmt.Fprintf(conn, "%s\n", conf.Password)
+				break
+			}
 		}
 
-		outputString := strings.TrimSpace(string(output))
+		fmt.Fprintf(conn, "%s\n", conf.Command)
+
+		var result strings.Builder
+		for {
+			conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				break
+			}
+			result.WriteString(line)
+		}
+
+		outputString := strings.TrimSpace(string(result.String()))
 		expectedOutputString := strings.TrimSpace(conf.ExpectedOutput)
 
 		if outputString != expectedOutputString {
 			errChan <- fmt.Errorf("expected output \"%s\" but got \"%s\"", expectedOutputString, outputString)
 			return
 		}
-
 		errChan <- nil
 	}()
 
