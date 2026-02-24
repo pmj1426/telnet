@@ -191,7 +191,7 @@ func Run(ctx context.Context, config string) error {
 		return fmt.Errorf("failed waiting for password prompt: %v", err)
 	}
 
-	if err := sendLine(conn, conf.Username); err != nil {
+	if err := sendLine(conn, conf.Password); err != nil {
 		return fmt.Errorf("failed sending password: %v", err)
 	}
 
