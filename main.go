@@ -1,15 +1,23 @@
-package ssh
+package telnet
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"net"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/scorify/schema"
+)
+
+const (
+	IAC  = 0xFF
+	WILL = 0xFB
+	WONT = 0xFC
+	DO   = 0xFD
+	DONT = 0xFE
+	SB   = 0xFA
+	SE   = 0xF0
 )
 
 type Schema struct {
@@ -52,6 +60,97 @@ func Validate(config string) error {
 	return nil
 }
 
+// handleIAC reads the rest of an IAC sequence and sends the
+// appropriate refusal response. Returns true if an IAC was handled.
+func handleIAC(conn net.Conn, firstByte byte) bool {
+	if firstByte != IAC {
+		return false
+	}
+
+	cmd := make([]byte, 1)
+	if _, err := conn.Read(cmd); err != nil {
+		return true
+	}
+
+	switch cmd[0] {
+	case DO:
+		// Server asks us to DO something — refuse with WONT
+		opt := make([]byte, 1)
+		conn.Read(opt)
+		conn.Write([]byte{IAC, WONT, opt[0]})
+
+	case WILL:
+		// Server says it WILL do something — refuse with DONT
+		opt := make([]byte, 1)
+		conn.Read(opt)
+		conn.Write([]byte{IAC, DONT, opt[0]})
+
+	case WONT, DONT:
+		// Server refusing something, just consume the option byte
+		opt := make([]byte, 1)
+		conn.Read(opt)
+
+	case SB:
+		// Subnegotiation — read until IAC SE
+		one := make([]byte, 1)
+		for {
+			if _, err := conn.Read(one); err != nil {
+				return true
+			}
+			if one[0] == IAC {
+				if _, err := conn.Read(one); err != nil {
+					return true
+				}
+				if one[0] == SE {
+					break
+				}
+			}
+		}
+
+	default:
+		// Some other 2-byte IAC command, just consume it
+	}
+
+	return true
+}
+
+func readUntilAny(
+	conn net.Conn,
+	targets []string,
+) (string, error) {
+
+	var buf bytes.Buffer
+	one := make([]byte, 1)
+
+	for {
+		n, err := conn.Read(one)
+		if n > 0 {
+			if handleIAC(conn, one[0]) {
+				continue
+			}
+
+			buf.Write(one[:n])
+			s := buf.String()
+
+			for _, t := range targets {
+				if strings.Contains(s, t) {
+					return s, nil
+				}
+			}
+		}
+
+		if err != nil {
+			return buf.String(), fmt.Errorf("read error waiting for %v: %w", targets, err)
+		}
+	}
+}
+
+// sendLine writes a string followed by a telnet newline (\r\n).
+func sendLine(conn net.Conn, line string) error {
+	_, err := conn.Write([]byte(line + "\r\n"))
+	return err
+}
+
 func Run(ctx context.Context, config string) error {
 	conf := Schema{}
 
@@ -65,65 +164,57 @@ func Run(ctx context.Context, config string) error {
 		return fmt.Errorf("context deadline is not set")
 	}
 
-	address := net.JoinHostPort(conf.Server, strconv.Itoa(conf.Port))
-	conn, err := net.DialTimeout("tcp", address, time.Until(deadline))
+	connStr := fmt.Sprintf("%s:%d", conf.Server, conf.Port)
+
+	dialer := net.Dialer{Deadline: deadline}
+	conn, err := dialer.DialContext(ctx, "tcp", connStr)
 	if err != nil {
-		return fmt.Errorf("tcp dial failed")
+		return fmt.Errorf("failed to dial %s: %w", connStr, err)
 	}
 	defer conn.Close()
+
 	conn.SetDeadline(deadline)
 
-	reader := bufio.NewReader(conn)
-
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("login failed")
-		}
-		if strings.Contains(line, "login:") {
-			fmt.Fprintf(conn, "%s\n", conf.Username)
-			break
-		}
-	}
-
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("login failed")
-		}
-		if strings.Contains(line, "Password:") {
-			fmt.Fprintf(conn, "%s\n", conf.Password)
-			break
-		}
-	}
-
-	line, err := reader.ReadString('\n')
+	// 1. Wait for login prompt
+	_, err = readUntilAny(conn, []string{"ogin:"})
 	if err != nil {
-		return fmt.Errorf("login failed")
-	}
-	if strings.Contains(line, "login:") {
-		return fmt.Errorf("Login failed with username or password")
+		return fmt.Errorf("failed waiting for login prompt: %v", err)
 	}
 
-	time.Sleep(1 * time.Second)
-
-	fmt.Fprintf(conn, "%s\n", conf.Command)
-
-	var result strings.Builder
-	for {
-		conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			break
-		}
-		result.WriteString(line)
+	if err := sendLine(conn, conf.Username); err != nil {
+		return fmt.Errorf("failed sending username: %v", err)
 	}
 
-	outputString := strings.TrimSpace(string(result.String()))
-	expectedOutputString := strings.TrimSpace(conf.ExpectedOutput)
+	// 2. Wait for password prompt
+	_, err = readUntilAny(conn, []string{"assword:"})
+	if err != nil {
+		return fmt.Errorf("failed waiting for password prompt: %v", err)
+	}
 
-	if outputString != expectedOutputString {
-		return fmt.Errorf("expected output \"%s\" but got \"%s\"", expectedOutputString, outputString)
+	if err := sendLine(conn, conf.Username); err != nil {
+		return fmt.Errorf("failed sending password: %v", err)
+	}
+
+	// 3. Wait for shell prompt (more robust detection)
+	_, err = readUntilAny(conn, []string{"$ ", "# "})
+	if err != nil {
+		return fmt.Errorf("failed waiting for shell prompt: %v", err)
+	}
+
+	// 4. Send command
+	if err := sendLine(conn, conf.Command); err != nil {
+		return fmt.Errorf("failed sending command: %v", err)
+	}
+
+	// 5. Read until prompt returns again
+	cmdOutput, err := readUntilAny(conn, []string{"$ ", "# "})
+	if err != nil {
+		return fmt.Errorf("failed reading command output: %v", err)
+	}
+
+	expected := []byte(conf.ExpectedOutput)
+	if !bytes.Contains([]byte(cmdOutput), expected) {
+		return fmt.Errorf("failed: outputs do not match; got: %s", cmdOutput)
 	}
 	return nil
 }
