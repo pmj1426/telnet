@@ -104,7 +104,7 @@ func Run(ctx context.Context, config string) error {
 		return fmt.Errorf("Login failed")
 	}
 
-	time.Sleep(.5 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	fmt.Fprintf(conn, "%s\n", conf.Command)
 
