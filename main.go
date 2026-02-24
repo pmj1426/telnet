@@ -71,7 +71,7 @@ func Run(ctx context.Context, config string) error {
 		return fmt.Errorf("tcp dial failed")
 	}
 	defer conn.Close()
-	conn.SetDeadline(ctx.Deadline)
+	conn.SetDeadline(deadline)
 
 	reader := bufio.NewReader(conn)
 
