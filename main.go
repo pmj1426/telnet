@@ -65,71 +65,64 @@ func Run(ctx context.Context, config string) error {
 		return fmt.Errorf("context deadline is not set")
 	}
 
-	errChan := make(chan error)
-
-	go func() {
-		defer close(errChan)
-
-		address := net.JoinHostPort(conf.Server, strconv.Itoa(conf.Port))
-		conn, err := net.DialTimeout("tcp", address, time.Until(deadline))
-		if err != nil {
-			errChan <- err
-			return
-		}
-		defer conn.Close()
-
-		reader := bufio.NewReader(conn)
-
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				errChan <- err
-				return
-			}
-			if strings.Contains(line, "login:") {
-				fmt.Fprintf(conn, "%s\n", conf.Username)
-				break
-			}
-		}
-
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				errChan <- err
-				return
-			}
-			if strings.Contains(line, "Password:") {
-				fmt.Fprintf(conn, "%s\n", conf.Password)
-				break
-			}
-		}
-
-		fmt.Fprintf(conn, "%s\n", conf.Command)
-
-		var result strings.Builder
-		for {
-			conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				break
-			}
-			result.WriteString(line)
-		}
-
-		outputString := strings.TrimSpace(string(result.String()))
-		expectedOutputString := strings.TrimSpace(conf.ExpectedOutput)
-
-		if outputString != expectedOutputString {
-			errChan <- fmt.Errorf("expected output \"%s\" but got \"%s\"", expectedOutputString, outputString)
-			return
-		}
-		errChan <- nil
-	}()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errChan:
-		return err
+	address := net.JoinHostPort(conf.Server, strconv.Itoa(conf.Port))
+	conn, err := net.DialTimeout("tcp", address, time.Until(deadline))
+	if err != nil {
+		return fmt.Errorf("tcp dial failed")
 	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("context deadline is not set")
+		}
+		if strings.Contains(line, "login:") {
+			fmt.Fprintf(conn, "%s\n", conf.Username)
+			break
+		}
+	}
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("context deadline is not set")
+		}
+		if strings.Contains(line, "Password:") {
+			fmt.Fprintf(conn, "%s\n", conf.Password)
+			break
+		}
+	}
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("context deadline is not set")
+	}
+	if strings.Contains(line, "login:") {
+		return fmt.Errorf("Login failed")
+	}
+
+	time.Sleep(.5 * time.Second)
+
+	fmt.Fprintf(conn, "%s\n", conf.Command)
+
+	var result strings.Builder
+	for {
+		conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+		result.WriteString(line)
+	}
+
+	outputString := strings.TrimSpace(string(result.String()))
+	expectedOutputString := strings.TrimSpace(conf.ExpectedOutput)
+
+	if outputString != expectedOutputString {
+		return fmt.Errorf("expected output \"%s\" but got \"%s\"", expectedOutputString, outputString)
+	}
+	return nil
 }
